@@ -3,18 +3,15 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"log"
 	"math"
 	"os"
 	"strconv"
 	"strings"
-)
 
-const (
-	ENTROPY_THRESHOLD = 4.0
-)
+	"github.com/urfave/cli/v2"
 
-type NGramMatrix map[string]map[rune]float64
+	"github.com/mattdietz/gibberish/markov"
+)
 
 func shannonEntropy(input string) float64 {
 	counts := make(map[rune]int)
@@ -31,157 +28,80 @@ func shannonEntropy(input string) float64 {
 	return result
 }
 
-func ngram(input string, ngramSize int) []string {
-	var result []string
-	input = strings.ToLower(input)
-	for i := 0; i < len(input)-ngramSize+1; i++ {
-		for j := 0; j < ngramSize; j++ {
-			if !validChar(rune(input[i+j])) {
-				continue
-			}
-		}
-		result = append(result, input[i:i+ngramSize])
-	}
-	return result
-}
-
-func validChar(r rune) bool {
-	return r >= 32 && r <= 126
-}
-
-func markovTrain(path string, ngramSize int) (float64, NGramMatrix) {
-	file, err := os.Open(path)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	counts := make(NGramMatrix)
-
-	scanner := bufio.NewScanner(file)
-	padding := strings.Repeat(" ", 2)
-	for scanner.Scan() {
-		// Padding the string with whitespace helps generalize the probabilities for markov chains
-		line := padding + strings.TrimSpace(scanner.Text()) + padding
-		ngrams := ngram(line, ngramSize)
-		for _, ngram := range ngrams {
-			bigram := ngram[:ngramSize-1]
-			nextChar := rune(ngram[ngramSize-1])
-			if _, ok := counts[bigram]; !ok {
-				counts[bigram] = make(map[rune]float64)
-			}
-			counts[bigram][nextChar]++
-		}
-	}
-
-	// normalize
-	probs := make(NGramMatrix)
-	for bigram, nextCharCounts := range counts {
-		total := 0.0
-		for _, count := range nextCharCounts {
-			total += count
-		}
-		probs[bigram] = make(map[rune]float64)
-		for char, count := range nextCharCounts {
-			probs[bigram][char] = math.Log(count / total)
-		}
-	}
-
-	goodProbs := calculateProbabilities("good.txt", probs)
-	badProbs := calculateProbabilities("bad.txt", probs)
-
-	minGood := goodProbs[0]
-	for _, prob := range goodProbs {
-		if prob < minGood {
-			minGood = prob
-		}
-	}
-
-	maxBad := badProbs[0]
-	for _, prob := range badProbs {
-		if prob > maxBad {
-			maxBad = prob
-		}
-	}
-
-	// TODO save the model to disk
-	threshold := (minGood + maxBad) / 2.0
-
-	return threshold, counts
-
-}
-
-func calculateProbabilities(path string, transitionProbs NGramMatrix) []float64 {
-	file, err := os.Open(path)
-	if err != nil {
-		log.Fatal(err)
-	}
-	var outputProbs []float64
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		prob, err := averageTransitionProbability(line, transitionProbs)
-		if err != nil {
-			continue
-		}
-
-		outputProbs = append(outputProbs, prob)
-	}
-	return outputProbs
-}
-
-func averageTransitionProbability(input string, probs NGramMatrix) (float64, error) {
-	logProb := 0.0
-
-	ngramSize := 0
-	for k, _ := range probs {
-		ngramSize = len(k) + 1
-		break
-	}
-
-	ngrams := ngram(input, ngramSize)
-	for _, ngram := range ngrams {
-		bigram := ngram[:ngramSize-1]
-		nextChar := rune(ngram[ngramSize-1])
-		if _, ok := probs[bigram]; ok {
-			// The probabilities are stored as log probabilities in the model to avoid underflow
-			if prob, ok := probs[bigram][nextChar]; ok {
-				logProb += prob
-			} else {
-				return 0, fmt.Errorf("No probability for %v", ngram)
-			}
-		} else {
-			return 0, fmt.Errorf("No probability for %v", ngram)
-		}
-	}
-
-	return logProb, nil
-}
-
-// Would this fail for unicode?
-func markovCheck(input string, threshold float64, probs NGramMatrix) bool {
-	prob, err := averageTransitionProbability(input, probs)
-	if err != nil {
-		return false
-	}
-	return prob > threshold
-}
-
 func main() {
-	ngramSize, err := strconv.Atoi(os.Args[1])
+	app := &cli.App{
+		Name: "gibberish",
+		Commands: []*cli.Command{
+			{
+				Name:   "train",
+				Action: trainModel,
+			},
+			{
+				Name:   "trainWords",
+				Action: trainModelWords,
+			},
+			{
+				Name:   "test",
+				Action: testModel,
+			},
+			{
+				Name:   "testBoth",
+				Action: testBoth,
+			},
+			{
+				Name:   "generate",
+				Action: generateText,
+			},
+		},
+	}
+
+	app.Run(os.Args)
+}
+
+func trainModel(ctx *cli.Context) error {
+	if len(ctx.Args().Slice()) != 5 {
+		fmt.Println("Usage: gibberish train <ngram size> <training file> <positive test file> <negative test file> <output file>")
+		return nil
+	}
+
+	ngramArg := ctx.Args().Get(0)
+	trainingPath := ctx.Args().Get(1)
+	positiveTestPath := ctx.Args().Get(2)
+	negativeTestPath := ctx.Args().Get(3)
+	outputPath := ctx.Args().Get(4)
+
+	ngramSize, err := strconv.Atoi(ngramArg)
 	if err != nil {
 		fmt.Println(err)
-		return
+		return err
 	}
 
-	threshold, probs := markovTrain(os.Args[2], ngramSize)
-	readFile, err := os.Open(os.Args[3])
+	model := markov.Train(trainingPath, positiveTestPath, negativeTestPath, ngramSize)
+	model.Save(outputPath)
 
+	return nil
+}
+
+func trainModelWords(ctx *cli.Context) error {
+	return fmt.Errorf("NOT IMPLEMENTED")
+}
+
+func testModel(ctx *cli.Context) error {
+	if len(ctx.Args().Slice()) != 2 {
+		fmt.Println("Usage: gibberish test <model file> <test file>")
+		return nil
+	}
+
+	modelPath := ctx.Args().Get(0)
+	testPath := ctx.Args().Get(1)
+	readFile, err := os.Open(testPath)
+	if err != nil {
+		fmt.Println(err)
+		return err
+	}
 	defer readFile.Close()
 
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
+	model := markov.LoadModel(modelPath)
 
 	fileScanner := bufio.NewScanner(readFile)
 
@@ -189,21 +109,83 @@ func main() {
 
 	for fileScanner.Scan() {
 		line := strings.TrimSpace(fileScanner.Text())
-		if strings.ToLower(line) == "null);" {
+		if len(line) < 3 {
 			continue
 		}
 
-		valid := markovCheck(line, threshold, probs)
+		valid, _ := model.Test(line)
 		if valid {
 			good++
 			fmt.Println(line)
 		} else {
-			//fmt.Println(line)
+			fmt.Println(line)
 		}
 		total++
 		// ent := shannonEntropy(line)
 		// fmt.Printf("entropy(%v:%v) markov(%v) -> %+v\n", ent, ent > ENTROPY_THRESHOLD, valid, line)
 	}
 	fmt.Printf("Good: %d, Total: %d, Accuracy: %f", good, total, float64(good)/float64(total))
+	return nil
+}
 
+func testBoth(ctx *cli.Context) error {
+	if len(ctx.Args().Slice()) != 3 {
+		fmt.Println("Usage: gibberish test <good model> <bad model> <test file>")
+		return nil
+	}
+
+	goodModelPath := ctx.Args().Get(0)
+	badModelPath := ctx.Args().Get(1)
+	testPath := ctx.Args().Get(2)
+	readFile, err := os.Open(testPath)
+	if err != nil {
+		fmt.Println(err)
+		return err
+	}
+	defer readFile.Close()
+
+	goodModel := markov.LoadModel(goodModelPath)
+	badModel := markov.LoadModel(badModelPath)
+
+	fileScanner := bufio.NewScanner(readFile)
+
+	good, bad := 0, 0
+
+	for fileScanner.Scan() {
+		line := strings.TrimSpace(fileScanner.Text())
+		if len(line) < 3 {
+			continue
+		}
+
+		goodProb, _ := goodModel.Probability(line)
+		badProb, _ := badModel.Probability(line)
+		if goodProb > badProb {
+			good++
+		} else if badProb > goodProb {
+			bad++
+		} else {
+			fmt.Println("TIE", line)
+		}
+	}
+	total := good + bad
+	goodPct := float64(good) / float64(total)
+	badPct := float64(bad) / float64(total)
+	fmt.Printf("Rated Good: (%d/%v), Rated Bad: (%d/%v), Total: %d\n", good, goodPct, bad, badPct, total)
+	return nil
+}
+
+func generateText(ctx *cli.Context) error {
+	if len(ctx.Args().Slice()) != 2 {
+		fmt.Println("Usage: gibberish generate <model file> <length>")
+		return nil
+	}
+	modelPath := ctx.Args().Get(0)
+	strLen, err := strconv.Atoi(ctx.Args().Get(1))
+	if err != nil {
+		fmt.Println(err)
+		return err
+	}
+	model := markov.LoadModel(modelPath)
+	fmt.Println(model.Generate(strLen, "  "))
+	return nil
 }
