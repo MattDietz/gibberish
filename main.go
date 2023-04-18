@@ -49,6 +49,10 @@ func main() {
 				Action: testBoth,
 			},
 			{
+				Name:   "testString",
+				Action: testString,
+			},
+			{
 				Name:   "generate",
 				Action: generateText,
 			},
@@ -77,7 +81,10 @@ func trainModel(ctx *cli.Context) error {
 	}
 
 	model := markov.Train(trainingPath, positiveTestPath, negativeTestPath, ngramSize)
-	model.Save(outputPath)
+	if err := model.Save(outputPath); err != nil {
+		fmt.Println(err)
+		return err
+	}
 
 	return nil
 }
@@ -164,13 +171,42 @@ func testBoth(ctx *cli.Context) error {
 		} else if badProb > goodProb {
 			bad++
 		} else {
-			fmt.Println("TIE", line)
+			//fmt.Println("TIE", line)
 		}
 	}
 	total := good + bad
 	goodPct := float64(good) / float64(total)
 	badPct := float64(bad) / float64(total)
 	fmt.Printf("Rated Good: (%d/%v), Rated Bad: (%d/%v), Total: %d\n", good, goodPct, bad, badPct, total)
+	return nil
+}
+
+func testString(ctx *cli.Context) error {
+	if len(ctx.Args().Slice()) < 3 {
+		fmt.Println("Usage: gibberish test <good model> <bad model> <input string>")
+		return nil
+	}
+
+	goodPath := ctx.Args().Get(0)
+	badPath := ctx.Args().Get(1)
+	testString := ctx.Args().Get(2)
+
+	goodModel := markov.LoadModel(goodPath)
+	badModel := markov.LoadModel(badPath)
+
+	line := strings.TrimSpace(testString)
+	var goodProb, badProb float64
+	var err error
+	goodProb, err = goodModel.Probability(line)
+	if err != nil {
+		fmt.Println(err)
+	}
+	badProb, err = badModel.Probability(line)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	fmt.Println(goodProb, badProb, goodProb > badProb)
 	return nil
 }
 
